@@ -1,0 +1,68 @@
+#!/usr/bin/perl
+#
+
+my $name=shift;
+
+my $h_skel=<<'EoF';
+/*******************************************************************************
+*           Copyright (C) 2010 Centellax, Inc., All rights reserved.
+*
+*                       3843 Brickway Blvd. Suite 100
+*                       Santa Rosa, CA 95403
+*                       Tel:(707)568-5900
+*
+* Filename:     __HDR__
+*
+* Description: The author didn't care to disclose what this does.
+*
+* $Author$
+*
+* $DateTime$
+*
+* $Id$
+*******************************************************************************/
+//#define TRACE_PRINT 1
+
+#ifndef ___CHIPU___INCLUDED
+#define ___CHIPU___INCLUDED
+
+#include "OSandPlatform.h"
+
+#ifdef GLOBAL___CHIPU__
+#define __CHIPU__GLOBAL
+#define __CHIPU__PRESET(A) = (A)
+#else
+#define __CHIPU__PRESET(A)
+#ifdef __cplusplus
+#define __CHIPU__GLOBAL extern "C"
+#else
+#define __CHIPU__GLOBAL extern
+#endif	/*__cplusplus*/
+#endif				/*GLOBAL___CHIPU__ */
+
+// ----------------------------------------------------------------
+// PRIVATE API AND SUBJECT TO CHANGE!
+// ----------------------------------------------------------------
+
+// ----------------------------------------------------------------
+// PUBLIC API definition
+// ----------------------------------------------------------------
+
+#endif				//___CHIPU___INCLUDED
+EoF
+
+$hdr=~s/\.h$//;
+
+my $hdr="$name". ".h";
+
+die("$hdr already exists.") if ( -f $hdr );
+
+
+my $chipu = uc($name);
+
+$h_skel =~s/__CHIPU__/$chipu/g;
+$h_skel =~s/__HDR__/$hdr/g;
+
+open(HS,">$hdr");
+print HS $h_skel;
+close(HS);

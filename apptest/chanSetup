@@ -1,0 +1,230 @@
+#!/usr/bin/perl
+#
+
+use Device::USB;
+use Data::Dumper qw(Dumper);
+
+my $cmd_str=$0;
+my $tmo=100;
+my $CMD_ACK=0;
+my $CMD_NAK=1;
+my $CMD_RESET=2;
+my $CMD_ID=3;
+my $CMD_WRITE_REG=4;
+my $CMD_READ_REG=5;
+my $CMD_ECHO=6;
+my $payload="";
+my $hdr="";
+my $txbuf="";
+my $rxbuf="";
+my $rx="";
+
+#Our early demo hardware only implements regset  B channel 1 
+my $RegSet="B";
+my $Chan=1;
+#my $Taps=[ 0.726, -1.0, .412, -0.187, 0.296, -0.109, -0.013, -0.095, 0.078 ]; #oneredoneblack
+#my $Taps = [ -35, 63, -15, 11, -18, 6, 0, 5, -4 ];
+#my $Taps = [ .7257, -1, .4121, -.1887, .2956, -.1054, -.0274, -.10449, .07248 ];
+#my $Taps = [ -6, -63, -26, -24, 9, -2, -2, -2, -2 ]; #Blue_red_red_dcblk.
+#my $Taps = [ -3, 63,  -26, -13, 5, -2, -2, -1, -1 ]; #Blue_dcblk
+my $Taps=[ -3, 63, -10, -4, -1, -1, -1, -1, -2 ];  #Hittite default
+my $OutputGain=0x3f;
+my $Offset=0x60;
+my $AGC=0x05
+;
+
+my $param;
+if (defined($param=shift(@ARGV))) {
+  $Taps->[0]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[1]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[2]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[3]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[4]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[5]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[6]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[7]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Taps->[8]=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $Offset=$param;
+}
+if (defined($param=shift(@ARGV))) {
+  $AGC=$param;
+}
+
+my $usb = Device::USB->new();
+my $dev;
+
+ConnectAndFind();
+setupChan($RegSet,$Chan,$Taps,$OutputGain,$Offset,$AGC,1);
+$dev->release_interface(0x2);
+exit;
+
+
+
+sub ConnectAndFind {
+
+  $dev = $usb->find_device( 0x1268, 0xfffe);
+
+  printf "Device: %04X:%04X\n", $dev->idVendor(), $dev->idProduct();
+  $dev->open();
+  print "Manufacturer: ", $dev->manufacturer(), "\n",
+    "Product: ", $dev->product(), "\n";
+
+  my $cfg = $dev->config()->[0];
+  my $numIf = $cfg->bNumInterfaces();
+
+  for (my $if=0; $if<$numIf; $if++) {
+    my $inter = $cfg->interfaces()->[$if]->[0];
+    my $numEp = $inter->bNumEndpoints();
+    printf("Interface: 0x%x ",$if);
+
+    for (my $epnum=0; $epnum<$numEp; $epnum++) {
+      my $ep = $inter->endpoints()->[$epnum];
+      printf("  Endpoint: 0x%x", $ep->bEndpointAddress());
+    }
+    printf("\n");
+  }
+
+  my $rval=$dev->claim_interface(0x2);
+  printf("Claim returns: $rval\n");
+}
+
+sub setupChan {
+  my $regset=shift;
+  my $chan=shift;
+  my $taps=shift;
+  my $outputGain=shift;
+  my $offset=shift;
+  my $agc=shift;
+  my $normalize=shift;
+
+  my $rset=0x0;                 #rset A
+  my $ch=0x0;                   #ch0
+  my $payload="";
+
+  #First, compute base address for regset/chan
+  if (uc($regset) eq "A") {
+    $rset=0x0;
+  }
+  if (uc($regset) eq "B") {
+    $rset=0x20;
+  }
+  if ($chan == 0) {
+    $ch=0x0;
+  }
+  if ($chan == 1) {
+    $ch=0x40;
+  }
+  my $baseAddr=$rset + $ch;
+
+  #Normalize taps
+  if ($normalize) {
+    my $max=0;
+#    my $min=1E99
+    my $j=0;
+    for ($j=0; $j<9; $j++) {
+      if (abs($taps->[$j]) > $max) {
+        $max=abs($taps->[$j]);
+      }
+#      if (($taps->[$j]) < $min) {
+#        $min=$taps->[$j];
+#      }
+    }
+    printf("Taps: ");
+    for ($j=0; $j<9; $j++) {
+      $taps->[$j] *= 63/$max;
+      $taps->[$j] = int($taps->[$j]);
+      printf("%d, ",$taps->[$j]);
+    }
+    printf("\n");
+  }
+
+  #Load the payload
+  $payload=pack("CC",$baseAddr,12); #12 registers
+  for ($j=0; $j<9; $j++) {
+    my $tbit=abs($taps->[$j]);
+    if ($tbit) {
+      if ($taps->[$j]>0) {
+        $tbit  |= 0xC0;
+      } else {
+        $tbit |= 0x80;
+      }
+    }
+    $payload .= pack("C",$tbit);
+  }
+  $payload .= pack("CCC",$outputGain,$offset,$agc);
+
+  #OK Payload's done ... add header
+  my $hdr = pack("CCv",(length($payload) + 4),$CMD_WRITE_REG,0);
+  my $txbuf = $hdr . $payload;
+
+  #Write the packet
+  my $ix=0;
+  do {
+    $ret=$dev->bulk_write(0x3,substr($txbuf,$ix),length($txbuf)-$ix,50);
+    #die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $ix += $ret;
+  } while ($ix<length($txbuf));
+  printf("%s TX: bulk write %d bytes\n",$cmd_str,$ix);
+
+  # now read the bulk USB response packet until it is emptied
+  # read again, if less than the entire packet is received
+  #   because the packet is not removed until ALL is read
+  my $rx="";
+  my $rxbuf="";
+  my $rxTot=0;
+  my $rxLen = 4;                # you must get at least a packet-header length
+  do {                          # keep reading until the entire packet is read
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    #die "$cmd_str ERROR reading on bulk USB endpoint\r\n"  if $ret < 0;
+    $rxTot += $ret;
+    $rxbuf .= $rx if ($ret > 0);
+    $rxLen = unpack("C",$rxbuf) if (length($rxbuf)>0);
+  } while ($ret>=0 && $rxTot < $rxLen);
+  printf("%s RX: bulk read  %d bytes\n",$cmd_str,$rxLen);
+
+
+  my ($rx_pl_size,$rx_cmd,$rx_cksum)=unpack("CCv",$rxbuf); # this is the header
+  my $rx_payload=substr($rxbuf,4); # what is left == payload
+
+  if ($rx_cmd!=$CMD_ACK) {
+
+
+    my $lcnt=0;
+    my $rx_pl_actual = length($rx_payload); # sanity check on ACK, NAK
+    printf("%s resp: read %d bytes\n",$cmd_str,length($rxbuf));
+    printf("%s resp: hdr-size: %u, hdr-cmd: %u, hdr-cksum: 0x%x\n",$cmd_str,$rx_pl_size,$rx_cmd,$rx_cksum);
+    printf("%s resp: actual rx-payload len: %u \n",$cmd_str, $rx_pl_actual);
+    $lcnt=0;
+    for ($k=0; $k<length($rx_payload); $k++) {
+      my $bval=unpack("C",substr($rx_payload,$k,1));
+      printf("%.2x ",$bval);
+      $lcnt += 4;
+      if ($lcnt > 36) {
+        printf("\n");
+        $lcnt=0;
+      }
+    }
+    printf("\n");
+  } else {
+    printf("ACK\n");
+  }
+}

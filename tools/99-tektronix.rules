@@ -1,0 +1,5 @@
+# Tektronix stuff is vendor id 0x1268
+# make it world writable
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="1268", MODE:="0666"
+
+

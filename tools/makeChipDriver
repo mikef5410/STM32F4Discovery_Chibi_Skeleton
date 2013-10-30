@@ -1,0 +1,103 @@
+#!/usr/bin/perl
+#
+
+my $name=shift;
+
+
+my $c_skel=<<'EoF';
+/*******************************************************************************
+*           Copyright (C) 2010 Centellax, Inc., All rights reserved.
+*
+*                       3843 Brickway Blvd. Suite 100
+*                       Santa Rosa, CA 95403
+*                       Tel:(707)568-5900
+*
+* Filename:     __FNAME__
+*
+* Description: __CHIPU__ "driver"
+*
+* $Author$
+*
+* $DateTime$
+*
+* $Id$
+*******************************************************************************/
+//#define TRACE_PRINT 1
+
+#include "OSandPlatform.h"
+
+#define GLOBAL___CHIPU__
+#include "__HDR__"
+EoF
+
+my $h_skel=<<'EoF';
+/*******************************************************************************
+*           Copyright (C) 2010 Centellax, Inc., All rights reserved.
+*
+*                       3843 Brickway Blvd. Suite 100
+*                       Santa Rosa, CA 95403
+*                       Tel:(707)568-5900
+*
+* Filename:     __HDR__
+*
+* Description: __CHIPU__ "driver"
+*
+* $Author$
+*
+* $DateTime$
+*
+* $Id$
+*******************************************************************************/
+//#define TRACE_PRINT 1
+
+#ifndef ___CHIPU___INCLUDED
+#define ___CHIPU___INCLUDED
+
+#include "OSandPlatform.h"
+
+#ifdef GLOBAL___CHIPU__
+#define __CHIPU__GLOBAL
+#define __CHIPU__PRESET(A) = (A)
+#else
+#define __CHIPU__PRESET(A)
+#ifdef __cplusplus
+#define __CHIPU__GLOBAL extern "C"
+#else
+#define __CHIPU__GLOBAL extern
+#endif	/*__cplusplus*/
+#endif				/*GLOBAL___CHIPU__ */
+
+// ----------------------------------------------------------------
+// PRIVATE API AND SUBJECT TO CHANGE!
+// ----------------------------------------------------------------
+
+// ----------------------------------------------------------------
+// PUBLIC API definition
+// ----------------------------------------------------------------
+
+#endif				//___CHIPU___INCLUDED
+EoF
+
+
+my $hdr="$name". ".h";
+my $cfile="$name".".c";
+
+die("$hdr already exists.") if ( -f $hdr );
+die("$cfile already exists.") if ( -f $cfile );
+
+
+my $chipu = uc($name);
+$c_skel =~s/__CHIPU__/$chipu/g;
+$c_skel =~s/__HDR__/$hdr/g;
+$c_skel =~s/__FNAME__/$cfile/g;
+
+$h_skel =~s/__CHIPU__/$chipu/g;
+$h_skel =~s/__HDR__/$hdr/g;
+
+open (CS,">$cfile");
+print CS $c_skel;
+close CS;
+
+open(HS,">$hdr");
+print HS $h_skel;
+close(HS);

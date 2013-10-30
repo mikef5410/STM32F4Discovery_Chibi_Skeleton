@@ -1,0 +1,91 @@
+#!/usr/bin/perl
+#
+
+use Device::USB;
+use Data::Dumper qw(Dumper);
+srand( time() ^ ( $$ + ( $$ << 15 ) ) );
+
+my $usb = Device::USB->new();
+my $dev = $usb->find_device( 0x1268, 0xfffe);
+
+printf "Device: %04X:%04X\n", $dev->idVendor(), $dev->idProduct();
+$dev->open();
+print "Manufacturer: ", $dev->manufacturer(), "\n",
+  "Product: ", $dev->product(), "\n";
+
+my $cfg = $dev->config()->[0];
+#print Dumper($dev);
+
+my $numIf = $cfg->bNumInterfaces();
+
+for (my $if=0; $if<$numIf; $if++) {
+  my $inter = $cfg->interfaces()->[$if]->[0];
+  my $numEp = $inter->bNumEndpoints();
+  printf("Interface: 0x%x ",$if);
+
+  for (my $epnum=0; $epnum<$numEp; $epnum++) {
+    my $ep = $inter->endpoints()->[$epnum];
+    printf("  Endpoint: 0x%x", $ep->bEndpointAddress());
+  }
+
+  printf("\n");
+
+}
+
+my $rval=$dev->claim_interface(0x2);
+printf("Claim returns: $rval\n");
+
+my $txbuf="help\r\n";
+my $rxbuf="";
+my $ret;
+
+my $tmo=100;
+
+my $plsize=int(rand(251));
+my $payload="";
+my $hdr="";
+for (my $k=0; $k<$plsize; $k++) {
+  $payload .= pack("C",int(rand(255)));
+}
+
+$CMD_ECHO=6;
+$hdr = pack("CCv",(length($payload) + 4),$CMD_ECHO,0);
+
+$txbuf = $hdr . $payload;
+
+
+$ret=$dev->bulk_write(0x3,$txbuf,length($txbuf),100);
+printf("Bulk write returns: %d\n",$ret);
+
+if (1) {
+  $rxbuf="";
+  my $rx="";
+  do {
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    $rxbuf .= $rx if ($ret > 0);
+  } while ($ret>=0);
+
+  my ($psize,$cmd,$cksum)=unpack("CCv",$rxbuf);
+  my $pload=substr($rxbuf,4);
+
+  printf("Read %d bytes\n",length($rxbuf));
+
+  printf("size: %u, command: %u, chsum: 0x%x\n",$psize,$cmd,$cksum);
+  my $lcnt=0;
+  for ($k=0; $k<length($pload); $k++) {
+    my $bval=unpack("C",substr($pload,$k,1));
+    printf("%.2x ",$bval);
+    $lcnt += 4;
+    if ($lcnt > 40) {
+      printf("\n");
+      $lcnt=0;
+    }
+  }
+  printf("\n");
+}
+
+
+$dev->release_interface(0x2);
+#$dev->close();
+exit;

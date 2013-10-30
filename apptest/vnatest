@@ -1,0 +1,37 @@
+#!/usr/bin/perl
+
+use RPCINST;
+
+my $vna=RPCINST->new("134.63.40.128","hpib7,16");
+$vna->iwrite("*idn?");
+my $idstr=$vna->iread();
+printf("VNA returns: %s\n",$idstr);
+
+$vna->iwrite("DISPLAY:WINDOW1:STATE ON");
+$vna->iwrite("DISPLAY:WINDOW2:STATE ON");
+$vna->iwrite("DISPLAY:WINDOW3:STATE ON");
+$vna->iwrite("DISPLAY:WINDOW4:STATE ON");
+$vna->iwrite("CALCULATE:PARAMETER:DEFINE:EXT 'MyS11',S11;");
+$vna->iwrite("CALCULATE:PARAMETER:DEFINE:EXT 'MyS12',S12;");
+$vna->iwrite("CALCULATE:PARAMETER:DEFINE:EXT 'MyS21',S21;");
+$vna->iwrite("CALCULATE:PARAMETER:DEFINE:EXT 'MyS22',S22;");
+
+$vna->iwrite("DISPLAY:WINDOW1:TRACE1:FEED 'MyS11';");
+$vna->iwrite("DISPLAY:WINDOW2:TRACE1:FEED 'MyS12';");
+$vna->iwrite("DISPLAY:WINDOW3:TRACE1:FEED 'MyS21';");
+$vna->iwrite("DISPLAY:WINDOW4:TRACE1:FEED 'MyS22';");
+$vna->iwrite("MMEMory:STORE:TRACE:FORMAT:SNP RI;");                                          
+
+$vna->iwrite("SENSE:SWEEP:MODE SINGLE;");
+$vna->iwrite("INITIATE:IMMEDIATE;");
+$vna->iwrite("*OPC?");
+my $resp=$vna->iread();
+print $resp,"\n";                               
+
+$vna->iwrite("CALC:DATA:SNP:PORTS:SAVE '1,2','F:/test.s2p';");
+$vna->iwrite("*OPC?");
+my $resp=$vna->iread();
+print $resp,"\n";                               
+
+
+exit;

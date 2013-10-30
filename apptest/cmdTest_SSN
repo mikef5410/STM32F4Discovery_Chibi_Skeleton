@@ -1,0 +1,777 @@
+#!/usr/bin/perl
+#
+
+use Device::USB;
+use Data::Dumper qw(Dumper);
+use Digest::MD5 qw(md5);
+
+srand( time() ^ ( $$ + ( $$ << 15 ) ) );
+
+my $DNP=1;     # DNP = "Do Not Print", turn off echo packets
+my $tmo=100;
+
+# The following list of commands MUST be identical to the 
+# typedef "pkttype_t"  in usbcmdio.h:
+my $CMD_ACK       = 0;
+my $CMD_NAK       = 1;
+my $CMD_RESET     = 2;
+my $CMD_ID        = 3;
+my $CMD_WRITE_REG = 4;
+my $CMD_READ_REG  = 5;
+my $CMD_ECHO      = 6;
+my $CMD_SSN       = 7;  # 96-bit (STM32) or 128-bit (NXP)
+my $CMD_UID       = 8;  # UID, first 48-bits of MD5 hash of SSN
+my $CMD_OPT       = 9;  # write/read option payload
+my $CMD_ISN       = 10; # instrument SN: write saves in flash, read reports
+my $CMD_DIAG      = 11;
+
+my $payload="";
+my $hdr="";
+my $txbuf="";
+my $rxbuf="";
+my $rx="";
+my $usb = Device::USB->new();
+my $dev = $usb->find_device( 0x1268, 0xfffe);
+
+sub ConnectAndFind {
+  my $verb = shift;  # accept a verbosity argument
+  my $VERB = 0;      # default to silent
+  if ($verb > 0) {
+    $VERB=$verb;
+  }
+  $dev = $usb->find_device( 0x1268, 0xfffe);
+  $dev->open();
+  printf "Device: %04X:%04X\n", $dev->idVendor(), $dev->idProduct() if $VERB > 0;
+  printf("Manufacturer: %s \nProduct: %s \n", $dev->manufacturer(),$dev->product()) if $VERB > 0;
+  my $cfg = $dev->config()->[0];
+  my $numIf = $cfg->bNumInterfaces();
+  for (my $if=0; $if<$numIf; $if++) {
+    my $inter = $cfg->interfaces()->[$if]->[0];
+    my $numEp = $inter->bNumEndpoints();
+    printf("Interface: 0x%x ",$if)                        if $VERB > 0;
+    for (my $epnum=0; $epnum<$numEp; $epnum++) {
+      my $ep = $inter->endpoints()->[$epnum];
+      printf("  Endpoint: 0x%x", $ep->bEndpointAddress()) if $VERB > 0;
+    }
+    printf("\n")                                          if $VERB > 0;
+  }
+  my $rval=$dev->claim_interface(0x2);
+  printf("Claim returns: $rval\n")                        if $VERB > 0;
+}
+
+# stub: cksums not computed: return zero for all checksums
+# inputs:     payload
+# output:     checksum (integer)
+sub get_cksum () {
+  my $payload = shift;
+  my $cksum = 0;
+  return $cksum;
+}
+
+# header = struct { len, cmd/type, checksum(int) }
+# inputs:    CMD
+#            payload
+# output:    header (string)
+sub set_hdr () {
+  my $cmd = shift;
+  my $payload = shift;
+  my $hdr     = "";
+  my $chksum  = &get_cksum($payload);
+  # pack CCV: C => unsigned char, v => unsigned 16-bit int
+  #           giving a total length of 4 bytes
+  $hdr = pack("CCv",(length($payload) + 4),$cmd,$chksum);
+  return $hdr;
+}
+
+# print string, treating all bytes as hex: for MD5/SHA1, UID
+sub byteString2hex {
+  my $instr=shift;
+  my $nbytes = length($instr);
+  my $hexstr="";
+  for ($j=0; $j<$nbytes; $j++) {
+    my $byte=unpack('C',substr($instr,$j,1));
+    $hexstr .= sprintf("%02X",$byte);
+  }
+  return($hexstr);
+} # end byteString2hex
+
+# print payload: individual bytes as hex
+sub print_payload {
+  my $rx_payload = shift;
+  my $pl_len = length($rx_payload);
+  my $lcnt=0;
+  my $k=0;
+  if ($pl_len > 0) {
+    printf("RX  payload:  ");
+    for ($k=0; $k<$pl_len; $k++) {
+      my $bval=unpack("C",substr($rx_payload,$k,1));
+      printf("0x%.2x ",$bval);
+      $lcnt++;
+      if ($lcnt > 16) {
+        printf("\n");
+        $lcnt=0;
+      }
+    }
+    printf("\n");
+  } else {
+    printf(" ...empty payload \r\n");
+  }
+} # end print_payload
+
+# get_resp_pl   get USB reply response, immediately after a CMD
+#               reads the bulk USB data until it is emptied
+#     input:    debug, printa results if > 0
+#     return:   payload (string context), may be empty
+#     output:   rx stats, if debug > 0
+#     output:   err msg if NAK detected
+sub get_resp_pl {
+  my $debug = shift;
+  my $ret   = 0;    # number of bytes received on USB
+  my $rxbuf ="";    # a string of 8-bit chars
+  my $rx    ="";
+  # build up the rxbuf until USB is emptied (ret == 0)
+  #       NOTE: this code assumes 255 or fewer bytes will be received
+  $rxbuf="";
+  do {
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    $rxbuf .= $rx if ($ret > 0);
+  } while ($ret>=0);
+  printf("RX: bulk read  %d bytes \n",length($rxbuf)) if $debug > 0;
+
+  # extract payload, check sanity of results
+  my ($rx_hdr_sz,$rx_ack_nak,$rx_cksum)=unpack("CCv",$rxbuf);# this is the header
+  my $rx_payload= substr($rxbuf,4);                          # payload is what is left
+  my $rx_pl_len = length($rx_payload);                       # payload length: may be empty
+  if ($ack_nak == $CMD_NAK) {
+    printf("get_payload:  NAK response \r\n");
+  }
+  if ($debug > 0 ) {
+    printf("get_payload:  bulk-read %d bytes \n",length($rxbuf));
+    printf("get_payload:  hdr-size  %u, ack-nak %u, cksum: 0x%x \n",$rx_hdr_sz,$rx_ack_nak,$rx_cksum);
+    printf("get_payload:  pl length %u bytes \n", $rx_pl_len);
+  }
+  return $rx_payload;
+} # end get_resp_pl (receive payload after a CMD)
+
+
+# send the ACK or NAK cmd, check sanity of response
+# inputs:   cmd
+# output:   n/a
+sub cmd_ACK_NAK () {
+  my $cmd = shift;
+  my $cmd_str = "";
+  my $cmd_status = 1;   # default to success/true/1
+  if ($cmd == $CMD_ACK) {
+    $cmd_str = "ACK";
+  } else {
+    $cmd_str = "NAK";
+  }
+  my $payload = "";
+  my $hdr     = &set_hdr($cmd, $payload);
+  my $ret     = 0;
+  my $tx      = "";
+  my $txbuf   = $hdr . $payload;
+  my $pktLen  = length($txbuf);
+  my $tmpBUF  = $txbuf;
+  my $notSent = 0;
+  my $txTot   = 0;
+
+  do {
+    $ret=$dev->bulk_write(0x3,$tmpBUF,length($tmpBUF),100);
+    die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $txTot += $ret;
+    $notSent = $pktLen - $txTot;
+    $tmpBUF = substr($txbuf,$txTot) if ($notSent > 0);
+  } while ($notSent>0);
+  printf("TX: bulk write %d bytes\n",$txTot) if $DNP < 1;
+
+  my $rx_payload="";     # sanity check: normally ACK, NAK have NO payload !!
+  my $rx_pl_len = 0;
+  $rx_payload = &get_resp_pl(0);  # debug argument: 0 => off, 1 => on
+  $rx_pl_len = length($rx_payload);
+  if ($rx_pl_len > 0) {
+	printf("ERROR: %s cmd should have zero payload, but pl len %u found \n\n",$cmd_str,$rx_pl_len);
+	&print_payload($rx_payload) if $DNP < 1;
+	$cmd_status = 0;
+  }
+  print "pass \r\n" if $cmd_status ==1;
+  print "fail \r\n" if $cmd_status ==0;
+  return $cmd_status;
+} # end of cmd_ACK_NAK
+
+
+# send the ID cmd, check sanity of response
+# inputs:   none
+# output:   n/a
+sub cmd_ID () {
+  my $cmd     = $CMD_ID;
+  my $cmd_str = "ID";
+  my $payload = "";
+  my $hdr     = &set_hdr($cmd, $payload);
+  my $ret     = 0;
+  my $tx      = "";
+  my $txbuf   = $hdr . $payload;
+  my $pktLen  = length($txbuf);
+  my $tmpBUF  = $txbuf;
+  my $notSent = 0;
+  my $txTot   = 0;
+  my $cmd_status = 1;
+
+  do {
+    $ret=$dev->bulk_write(0x3,$tmpBUF,length($tmpBUF),100);
+    die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $txTot  += $ret;
+    $notSent = $pktLen - $txTot;
+    $tmpBUF  = substr($txbuf,$txTot) if ($notSent > 0);
+  } while ($notSent>0);
+  printf("TX: bulk write %d bytes\n",$txTot) if $DNP < 1;
+
+  my $rx_payload ="";
+  my $rx_pl_len  = 0;
+  $rx_payload    = &get_resp_pl(0);  # debug argument: 0 => off, 1 => on
+  $rx_pl_len     = length($rx_payload);
+
+  # if ( ($rx_pl_len > 0) && ($DNP < 1) ) {
+  if ($rx_pl_len <= 0) {
+	$cmd_status = 0;
+  } else {
+    printf("RX: pl len: %u \n\n",$rx_pl_len)               if $DNP < 1;
+    # &print_payload($rx_payload);
+
+    my ($prod,$proto,$major,$minor,$bld_num,$sha_len)=unpack("CCCCvC",$rx_payload);
+    my $sha1         = substr($rx_payload,7,$sha_len);
+    my $info         = substr($rx_payload,7+$sha_len);
+    my $bld_info_len = unpack("C",$info);
+    my $bld_info     = substr($info,1);
+    printf("ID: protocol %02u, hw %02u, fw %02u.%02u.%04u  \r\n",$proto,$prod,$major,$minor,$bld_num);
+    printf("ID: SHA1 %8s  \r\n",$sha1);
+    printf("ID: %s  \r\n",$bld_info);
+  } # end of test on length of payload
+  print "pass \r\n" if $cmd_status ==1;
+  print "fail \r\n" if $cmd_status ==0;
+  return $cmd_status;
+} # end of cmd_ID
+
+# send the SSN cmd
+# inputs:   none
+# output:   n/a
+sub cmd_SSN () {
+  my $cmd     = $CMD_SSN;
+  my $cmd_str = "SSN";
+  my $payload = "";
+  my $hdr     = &set_hdr($cmd, $payload);
+  my $ret     = 0;
+  my $tx      = "";
+  my $txbuf   = $hdr . $payload;
+  my $pktLen  = length($txbuf);
+  my $tmpBUF  = $txbuf;
+  my $notSent = 0;
+  my $txTot   = 0;
+  my $cmd_status = 1;   # default to success/true/1
+
+  do {
+    $ret=$dev->bulk_write(0x3,$tmpBUF,length($tmpBUF),100);
+    die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $txTot  += $ret;
+    $notSent = $pktLen - $txTot;
+    $tmpBUF  = substr($txbuf,$txTot) if ($notSent > 0);
+  } while ($notSent>0);
+  printf("TX: bulk write %d bytes\n",$txTot) if $DNP < 1;
+
+  my $rx_payload ="";
+  my $rx_pl_len  = 0;
+  $rx_payload    = &get_resp_pl(0);  # debug argument: 0 => off, 1 => on
+  $rx_pl_len     = length($rx_payload);
+
+  # if ( ($rx_pl_len > 0) && ($DNP < 1) ) {
+  if ($rx_pl_len <= 0) {
+	$cmd_status = 0;
+  } else {
+    # printf("RX: pl len: %u \n\n",$rx_pl_len);
+    # &print_payload($rx_payload);
+
+    my ($ssn_cnt,$dmy2,$dmy3,$dmy4)=unpack("CCCC",$rx_payload);
+	my $ssn = substr($rx_payload,4);
+	# my $hash_input1=0;
+	my $hash_input2=0;
+
+	&print_payload($ssn);
+
+	if ($ssn_cnt < 4) {
+	  # 96-bit SSN
+	  my ($ssn1,$ssn2,$ssn3) = unpack("VVV", $ssn);   # little-endian 32-bit unsigned INT's
+	  printf("0x%.8x%.8x%.8x \n",$ssn3,$ssn2,$ssn1);  # human-readable: big-endian
+	  #$hash_input1 = pack("NNN",$ssn3,$ssn2,$ssn1);   # re-pack as big-endian for md5
+	  $hash_input2 = pack("VVV",$ssn1,$ssn2,$ssn3);   # re-pack as little-endian for md5
+	} else {
+	  # 128-bit SSN
+	  my ($ssn1,$ssn2,$ssn3,$ssn4)= unpack("VVVV",$ssn);
+	  printf("0x%.8x%.8x%.8x%.8x \n",$ssn4,$ssn3,$ssn2,$ssn1);  # human-readable: big-endian
+	  #$hash_input1 = pack("NNNN",$ssn4,$ssn3,$ssn2,$ssn1); # re-pack
+	  $hash_input2 = pack("VVVV",$ssn1,$ssn2,$ssn3,$ssn4); # re-pack, little-endian
+	}
+	#my $digest1 = md5 ($hash_input1);
+	my $digest2 = md5 ($hash_input2);
+
+	# printf("\t SSN in2 %s\n",  byteString2hex($ssn));
+	# printf("\t SSN in1: %s \n",  byteString2hex($hash_input1));
+	printf("\t SSN in2: %s \n",  byteString2hex($hash_input2));
+	# printf("\t MD5-1:   0x%s \n",byteString2hex($digest1));
+	printf("\t MD5-2:   0x%s \n",byteString2hex($digest2));
+  } # end of test on length of payload
+  print "pass \r\n" if $cmd_status ==1;
+  print "fail \r\n" if $cmd_status ==0;
+  return $cmd_status;
+} # end of cmd_SSN
+
+# send the READ_REG cmd, check sanity of response
+# inputs:        reg-set  (A or B)
+#                channel  (0 or 1)
+#                reg addr (0-11)
+# output:   contents of register N
+sub cmd_READ_REG () {
+  my $READ_DEBUG = 1;
+  my $reg_set  = shift;
+  my $reg_chan = shift;
+  my $reg_addr = shift;
+  my $r_set = 0x20;    # default B register set
+  my $r_ch=1;          # default 1 chan
+  my $cmd_str = "READ";
+
+  if ($reg_addr > 0xB) {
+    printf("ERROR: input register address must be between 0 and 11");
+    return 1;
+  }
+
+  #First, compute base address for regset/chan
+  if (uc($reg_set) eq "A") {
+    $r_set=0x0;
+  }
+  if (uc($reg_set) eq "B") {
+    $r_set=0x20;
+  }
+  if ($reg_chan == 0) {
+    $r_ch=0x0;
+  }
+  if ($reg_chan == 1) {
+    $r_ch=0x40;
+  }
+
+  my $baseAddr=$r_set + $r_ch;
+  my $txAddr  =$baseAddr + $reg_addr;
+  # printf("READ_REG: register:    %2u \r\n", $reg_addr);
+  printf("%s TX: reg num     %02u  \r\n",$cmd_str,$reg_addr)   if $DNP < 1;
+  printf("%s TX: addr        0x%2x  \r\n",$cmd_str,$txAddr)    if $DNP < 1;
+
+  $payload=pack("CC",$txAddr,1); # 1 => reading only one register
+
+  #OK Payload's done ... add header
+  my $hdr = pack("CCv",(length($payload) + 4),$CMD_READ_REG,0);
+  my $txbuf = $hdr . $payload;
+
+  #Write the packet
+  my $ix=0;
+  do {
+    $ret=$dev->bulk_write(0x3,substr($txbuf,$ix),length($txbuf)-$ix,50);
+    #die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $ix += $ret;
+  } while ($ix<length($txbuf));
+  printf("%s TX: bulk write  %d bytes\n",$cmd_str,$ix)         if $DNP < 1;
+
+  # now read the bulk USB response packet until it is emptied
+  # read again, if less than the entire packet is received
+  #   because the packet is not removed until ALL is read
+  my $rx="";
+  my $rxbuf="";
+  my $rxTot=0;
+  my $rxLen = 0;                # you must get at least a packet-header length
+  do {                          # keep reading until the entire packet is read
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    #die "$cmd_str ERROR reading on bulk USB endpoint\r\n"  if $ret < 0;
+    $rxTot += $ret;
+    $rxbuf .= $rx if ($ret > 0);
+    $rxLen = unpack("C",$rxbuf) if (length($rxbuf)>0);
+  } while ($ret>=0 && $rxTot < $rxLen);
+  printf("%s RX: bulk read   %d bytes\n",$cmd_str,$rxLen)      if $DNP < 1;
+
+  # check that the return makes sense
+  my ($rx_pl_size,$rx_cmd,$rx_cksum)=unpack("CCv",$rxbuf);  # this is the header
+  my $rx_payload=substr($rxbuf,4);                    # what is left == payload
+  my $lcnt=0;
+  my $rx_pl_actual = length($rx_payload);             # sanity check on ACK, NAK
+  printf("%s RX: hdr         %u sz, %u cmd, 0x%x cksum \n",$cmd_str,$rx_pl_size,$rx_cmd,$rx_cksum) if $DNP < 1;
+  # printf("%s RX: payload len %u \n",$cmd_str, $rx_pl_actual); # if $DNP < 1;
+  if (($DNP < 1) || $READ_DEBUG) {
+    printf("%s RX: payload     ",$cmd_str); # if $DNP < 1;
+    my $lcnt=0;
+    for ($k=0; $k<length($rx_payload); $k++) {
+      my $bval=unpack("C",substr($rx_payload,$k,1));
+      printf("%.2x ",$bval);
+      $lcnt += 4;
+      if ($lcnt > 36) {
+        printf("\n");
+        $lcnt=0;
+      }
+    }
+    printf("\n");
+  }
+} # end of cmd_READ_REG
+
+
+# send the ECHO cmd, randomized payload, check sanity of response
+# inputs:   none
+# output:   print of chars received back
+sub cmd_ECHO_rand () {
+  my $cmd = $CMD_ECHO;
+  my $cmd_str  = "ECHO";
+  my $plsize=int(rand(251));     # random payload size
+  my $payload = "";              # make a payload of random chars
+  for (my $k=0; $k<$plsize; $k++) {
+    $payload .= pack("C",int(rand(255)));
+  }
+  my $hdr = &set_hdr($cmd, $payload);
+  my $ret = 0;
+  my $tx = "";
+  my $txbuf   = $hdr . $payload;
+  my $pktLen  = length($txbuf);
+  my $tmpBUF  = $txbuf;
+  my $notSent = 0;
+  my $txTot   = 0;
+
+  do {
+    $ret=$dev->bulk_write(0x3,$tmpBUF,length($tmpBUF),100);
+    die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $txTot += $ret;
+    $notSent = $pktLen - $txTot;
+    $tmpBUF = substr($txbuf,$txTot) if ($notSent > 0);
+  } while ($notSent>0);
+  printf("%s TX: bulk write %d bytes\n",$cmd_str,$txTot) if $DNP < 1;
+
+  # now read the bulk USB response packet until it is emptied
+  # read again, if less than the entire packet is received
+  #   because the packet is not removed until ALL is read
+  my $rx="";
+  my $rxbuf="";
+  my $rxTot=0;
+  my $rxLen = 4;  # you must get at least a packet-header length
+  do {    # keep reading until the entire packet is read
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    die "$cmd_str ERROR reading on bulk USB endpoint\r\n"  if $ret < 0;
+    $rxTot += $ret;
+    $rxbuf .= $rx if ($ret > 0);
+    $rxLen = unpack("C",$rxbuf) if (length($rxbuf)>0);
+  } while ($ret>=0 && $rxTot < $rxLen);
+  printf("%s RX: bulk read  %d bytes\n",$cmd_str,$rxLen) if $DNP < 1;
+
+  # check that the return makes sense
+  my ($rx_pl_size,$rx_cmd,$rx_cksum)=unpack("CCv",$rxbuf);  # this is the header
+  my $rx_payload=substr($rxbuf,4);                    # what is left == payload
+  my $lcnt=0;
+  my $rx_pl_actual = length($rx_payload);             # sanity check on ACK, NAK
+  printf("%s resp: read %d bytes\n",$cmd_str,length($rxbuf)) if $DNP < 1;
+  printf("%s resp: hdr-size: %u, hdr-cmd: %u, hdr-cksum: 0x%x\n",$cmd_str,$rx_pl_size,$rx_cmd,$rx_cksum) if $DNP < 1;
+  printf("%s resp: actual rx-payload len: %u \n",$cmd_str, $rx_pl_actual) if $DNP < 1;
+  printf("%s payload: \n",$cmd_str) if $DNP < 1;
+  my $lcnt=0;
+  for ($k=0; $k<length($rx_payload); $k++) {
+    my $bval=unpack("C",substr($rx_payload,$k,1));
+    printf("%.2x ",$bval) if $DNP < 1;
+    $lcnt += 4;
+    if ($lcnt > 36) {
+      printf("\n") if $DNP < 1;
+      $lcnt=0;
+    }
+  }
+  printf("\n\n") if $DNP < 1;
+} # end cmd ECHO_rand (random payload each time called)
+
+
+# send sequence of register writes to setup chan 1
+#   for all 9 taps, and defaults for gain, offset, and AGC
+#
+sub cmd_chan_one_all_regs () {
+  my $payload = pack("CCCCCCCCCCCCCC",
+    0x40, #REG_CH1_TAP0_A ... regAddr
+    12, #Twelve registers ... numReg
+    0x80 | 3, # -3      Tap0
+    0xC0 | 63, # +63
+    0x80 | 10, # -10
+    0x80 | 4, # -4
+    0x80 | 1, # -1
+    0x80 | 1, # -1
+    0x80 | 1, # -1
+    0x80 | 1, # -1
+    0x80 | 2, # -2      Tap8
+    0x3F , #default output gain
+    0x00 , #default offset
+    0x04 , #default agc
+    );
+
+  $hdr = pack("CCv",(length($payload) + 4),$CMD_WRITE_REG,0);
+  $txbuf = $hdr . $payload;
+  $ret=$dev->bulk_write(0x3,$txbuf,length($txbuf),100);
+  printf("CHAN1-ALL-REGS: bulk write returns: %d\n",$ret);
+
+  # now read the bulk USB data until it is emptied
+  #   note: this code assumes 255 or fewer bytes will be received
+  $rxbuf="";
+  do {
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    $rxbuf .= $rx if ($ret > 0);
+  } while ($ret>=0);
+
+  # check that the return makes sense
+  my ($rx_pl_size,$rx_cmd,$rx_cksum)=unpack("CCv",$rxbuf);  # this is the header
+  my $rx_payload=substr($rxbuf,4);                    # what is left == payload
+  my $lcnt=0;
+  my $rx_pl_actual = length($rx_payload);             # sanity check on ACK, NAK
+  printf("CHAN1-ALL-REGS resp: read %d bytes\n",length($rxbuf));
+  printf("CHAN1-ALL-REGS resp: hdr-size: %u, hdr-cmd: %u, hdr-cksum: 0x%x\n",$rx_pl_size,$rx_cmd,$rx_cksum);
+  printf("CHAN1-ALL-REGS resp: actual rx-payload len: %u \n", $rx_pl_actual);
+  my $lcnt=0;
+  for ($k=0; $k<length($rx_payload); $k++) {
+    my $bval=unpack("C",substr($rx_payload,$k,1));
+    printf("%.2x ",$bval);
+    $lcnt += 4;
+    if ($lcnt > 40) {
+      printf("\n");
+      $lcnt=0;
+    }
+  }
+  printf("\n");
+} # end cmd_chan_1_all_regs
+
+
+sub setupChan {
+  #my $Taps=[ 0.726, -1.0, .412, -0.187, 0.296, -0.109, -0.013, -0.095, 0.078 ]; #oneredoneblack
+  #my $Taps = [ -35, 63, -15, 11, -18, 6, 0, 5, -4 ];
+  #my $Taps = [ .7257, -1, .4121, -.1887, .2956, -.1054, -.0274, -.10449, .07248 ];
+  #my $Taps = [ -6, -63, -26, -24, 9, -2, -2, -2, -2 ]; #Blue_red_red_dcblk.
+  #my $Taps = [ -3, 63,  -26, -13, 5, -2, -2, -1, -1 ]; #Blue_dcblk
+
+  # my $regset="B";
+  # my $chan=1;
+  my $regset   = shift;    # "A" or "B"
+  my $chan     = shift;    # "0" or "1"
+  my $reg_addr = shift;    # "0" to "11" 
+  my $cmd_str  = "WRITE";
+  my $rset=0x40;           # default: rset equivalent to "B"
+  my $rch=0x20;            # default: equivalent to chan "1"
+
+  if ($reg_addr > 11) {
+    printf("ERROR: input register address must be between 0 and 11");
+    return 1;
+  }
+
+  #First, compute base address for regset/chan
+  if (uc($regset) eq "A") {
+    $rset=0x0;
+  }
+  if (uc($regset) eq "B") {
+    $rset=0x20;
+  }
+  if ($chan == 0) {
+    $rch=0x0;
+  }
+  if ($chan == 1) {
+    $rch=0x40;
+  }
+  my $baseAddr=$rset + $rch;
+  my $txAddr  =$baseAddr + $reg_addr;
+  printf("%s TX: addr        0x%2x  \r\n",$cmd_str,$txAddr)    if $DNP < 1;
+
+  my $taps=[ -3, 63, -10, -4, -1, -1, -1, -1, -2 ];  #Hittite default
+  my $outputGain=0xef;
+  my $offset=0x60;
+  my $agc=0x05;
+  my $normalize=0;  #  turn off  normalize
+  my $payload="";
+
+  #Normalize taps
+  if ($normalize) {
+    my $max=0;
+    # my $min=1E99
+    my $j=0;
+    for ($j=0; $j<9; $j++) {
+      if (abs($taps->[$j]) > $max) {
+        $max=abs($taps->[$j]);
+      }
+      #  if (($taps->[$j]) < $min) {
+      #    $min=$taps->[$j];
+      #  }
+    }
+    printf("NORMALIZED Taps: ");
+    for ($j=0; $j<9; $j++) {
+      $taps->[$j] *= 63/$max;
+      $taps->[$j] = int($taps->[$j]);
+      printf("%d, ",$taps->[$j]);
+    }
+    printf("\n");
+  }
+
+  #Load the payload
+  $payload=pack("CC",$baseAddr,12); #12 registers
+  printf("Taps: \r\n")                            if $DNP < 1;
+  for ($j=0; $j<9; $j++) {
+    printf("[%d], raw: %3d, ",$j,$taps->[$j])     if $DNP < 1;
+    my $tbit=abs($taps->[$j]);
+    if ($tbit) {
+      if ($taps->[$j]>0) {
+        $tbit  |= 0xC0;
+      } else {
+        $tbit |= 0x80;
+      }
+    }
+    printf("hex: 0x%2x, %d \r\n",$tbit,$tbit)    if $DNP < 1;
+    $payload .= pack("C",$tbit);
+  }
+  $payload .= pack("CCC",$outputGain,$offset,$agc);
+
+  #OK Payload's done ... add header
+  my $hdr = pack("CCv",(length($payload) + 4),$CMD_WRITE_REG,0);
+  my $txbuf = $hdr . $payload;
+
+  #Write the packet
+  my $ix=0;
+  do {
+    $ret=$dev->bulk_write(0x3,substr($txbuf,$ix),length($txbuf)-$ix,50);
+    #die "$cmd_str ERROR writing on bulk USB endpoint\r\n"  if $ret < 0;
+    $ix += $ret;
+  } while ($ix<length($txbuf));
+  printf("%s TX: bulk write %d bytes\n",$cmd_str,$ix)     if $DNP < 1;
+
+  # now read the bulk USB response packet until it is emptied
+  # read again, if less than the entire packet is received
+  #   because the packet is not removed until ALL is read
+  my $rx="";
+  my $rxbuf="";
+  my $rxTot=0;
+  my $rxLen = 4;                # you must get at least a packet-header length
+  do {                          # keep reading until the entire packet is read
+    $rx="";
+    $ret=$dev->bulk_read(0x3,$rx,255,100);
+    #die "$cmd_str ERROR reading on bulk USB endpoint\r\n"  if $ret < 0;
+    $rxTot += $ret;
+    $rxbuf .= $rx if ($ret > 0);
+    $rxLen = unpack("C",$rxbuf) if (length($rxbuf)>0);
+  } while ($ret>=0 && $rxTot < $rxLen);
+  printf("%s RX: bulk read  %d bytes\n",$cmd_str,$rxLen)            if $DNP < 1;
+
+  my ($rx_pl_size,$rx_cmd,$rx_cksum)=unpack("CCv",$rxbuf); # this is the header
+  my $rx_payload=substr($rxbuf,4); # what is left == payload
+
+  my $lcnt=0;
+  my $rx_pl_len = length($rx_payload); # sanity check on ACK, NAK
+  # printf("%s RX: read %d bytes\n",$cmd_str,length($rxbuf));
+  printf("%s RX: pkt sz: %u, ACK-NAK: %u, cksum: 0x%x\n",$cmd_str,$rx_pl_size,$rx_cmd,$rx_cksum) if $DNP < 1;
+  if (($DNP < 1) && ($rx_pl_len > 0)) {
+    printf("%s RX: pl len: %u \n",$cmd_str, $rx_pl_len);
+    my $lcnt=0;
+    for ($k=0; $k<$rx_pl_len; $k++) {
+      my $bval=unpack("C",substr($rx_payload,$k,1));
+      printf("%.2x ",$bval);
+      $lcnt += 4;
+      if ($lcnt > 36) {
+        printf("\n");
+        $lcnt=0;
+      }
+    }
+    printf("\n");
+  } # end $DNP (do not print) test
+} #  end setup_chan, from Mike's chanSetup
+
+
+# Stall, wait for user input
+#   this method can be used to modify global vars
+#   and therefore control program execution
+sub stall () {
+  # pause to accept commands, allow gdb attach
+ WAIT:
+  printf ("Waiting for input 'Y' to continue __ ");
+  $_ = <STDIN>;
+  if (uc($_) =~ /Y/) {             # could match cmds here...
+    print ("Here we go !! \n");    # emit cmd-specific text
+  } else {
+    goto WAIT;
+  }
+} # end of sub stall
+
+# main
+
+&ConnectAndFind;
+
+$DNP = 1;  #  turn off prints
+
+#   call each command in succession
+print "\r\nstall before ACK ..."; $_ = <STDIN>;  # used to set breakpoint(s)
+&cmd_ACK_NAK($CMD_ACK);
+print "\r\nstall before NAK ..."; $_ = <STDIN>;  # used to set breakpoint(s)
+&cmd_ACK_NAK($CMD_NAK);
+print "\r\nstall before ID ..."; $_ = <STDIN>;
+&cmd_ID();
+print "\r\nstall before SSN ..."; $_ = <STDIN>;
+&cmd_SSN();
+print "\r\nstall before ECHO ..."; $_ = <STDIN>;
+&cmd_ECHO_rand();
+
+print "\r\nstall before WRT bank A, chan 0 ..."; $_ = <STDIN>;
+&setupChan("A","0","0");
+print "\r\nstall before WRT bank A, chan 1 ..."; $_ = <STDIN>;
+&setupChan("A","1","0");
+print "\r\nstall before WRT bank B, chan 0 ..."; $_ = <STDIN>;
+&setupChan("B","0","0");
+print "\r\nstall before WRT bank B, chan 1 ..."; $_ = <STDIN>;
+&setupChan("B","1","0");
+
+my $dly=-10000;
+my $dmmy=0;
+my $jCh  = 0;
+my $jReg = "A";
+print "\r\nstall before READ of Port 0,1, reg-set A ..."; $_ = <STDIN>;
+
+for($jCh=0;$jCh<2;$jCh++) {
+  printf("Port %d: \r\n",$jCh);
+  for(my $addr=0;$addr<12;$addr++) {
+    &cmd_READ_REG($jReg, $jCh, $addr);
+    $dly=-10000;
+    while($dly++ > 0) {
+      $dmmy++;
+    }
+  }
+}
+
+my $jReg = "B";
+print "\r\nstall before READ of Port 0,1, reg-set B ..."; $_ = <STDIN>;
+for($jCh=0;$jCh<2;$jCh++) {
+  printf("Port %d: \r\n",$jCh);
+  for(my $addr=0;$addr<12;$addr++) {
+    &cmd_READ_REG($jReg, $jCh, $addr);
+    $dly=-10000;
+    while($dly++ > 0) {
+      $dmmy++;
+    }
+  }
+}
+
+# print "stall before max-speed setupChanO ..."; $_ = <STDIN>;
+#
+# # call commands in a loop
+# my $cnt=100;
+#
+# for(my $iter=0;$iter<$cnt;$iter++) {
+#   &setupChan();
+#   &cmd_ID;
+#   printf("%03d  ",$iter) if ($iter %20 == 0);
+#   # print results for last few iterations
+#   if ($iter >= ($cnt-5)) {
+#     $DNP = 0;
+#   }
+# }
+
+$dev->release_interface(0x2);
+#$dev->close();
+exit;

@@ -1,0 +1,33 @@
+#!/usr/bin/perl
+#
+
+#Scan bus looking for LE320
+
+use Device::USB;
+use Data::Dumper qw(Dumper);
+
+my $usb = Device::USB->new();
+my $dev = $usb->find_device( 0x1268, 0xfffe);
+
+printf "Device: %04X:%04X\n", $dev->idVendor(), $dev->idProduct();
+$dev->open();
+print "Manufacturer: ", $dev->manufacturer(), "\n",
+      " Product: ", $dev->product(), "\n";
+
+my $cfg = $dev->config()->[0];
+#print Dumper($dev);
+
+my $numIf = $cfg->bNumInterfaces();
+
+for (my $if=0; $if<$numIf; $if++) {
+  my $inter = $cfg->interfaces()->[$if]->[0];
+  my $numEp = $inter->bNumEndpoints();
+  printf("Interface: 0x%x ", $if);
+
+  for (my $epnum=0; $epnum<$numEp; $epnum++) {
+    my $ep = $inter->endpoints()->[$epnum];
+    printf("  Endpoint: 0x%x", $ep->bEndpointAddress());
+  }
+
+  printf("\n");
+}
