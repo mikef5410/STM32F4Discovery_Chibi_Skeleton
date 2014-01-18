@@ -1,0 +1,8 @@
+function linaro
+{
+    export PATH=/opt/cross-arm-linaro/bin:/opt/oocd/bin:$PATH
+    export PATH=`cleandups PATH`
+    export PROMPT_COMMAND='echo -ne "\033]0;LINARO ${USER}@${HOSTNAME}:${PWD}\007"'
+    alias  startST="xterm -e st-util -p 4242"
+}
+
